@@ -1,0 +1,22 @@
+{
+  "name": "luckyapi-slides",
+  "owner": {
+    "name": "Osgood001",
+    "email": ""
+  },
+  "metadata": {
+    "description": "AI-powered slide deck generator using LuckyAPI with Gemini image generation",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "luckyapi-slides",
+      "description": "Generate slide decks as images and combine into PDF presentations",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./"
+      ]
+    }
+  ]
+}
