@@ -4,11 +4,19 @@ AI-powered slide deck generator using LuckyAPI with `(按次)gemini-3-pro-image-
 
 ## Install into Claude Code
 
-```bash
-claude plugin add --from github:Osgood001/luckyapi-slides
+### Step 1: Register the Marketplace
+
+```
+/plugin marketplace add Osgood001/luckyapi-slides
 ```
 
-Then set your API key:
+### Step 2: Install the Plugin
+
+```
+/plugin install luckyapi-slides@luckyapi-slides
+```
+
+### Step 3: Set your API key
 
 ```bash
 export ANTHROPIC_AUTH_TOKEN="your-luckyapi-key"
