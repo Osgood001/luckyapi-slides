@@ -2,12 +2,15 @@
 """Generate a single presentation slide image via LuckyAPI.
 
 Uses (按次)gemini-3-pro-image-preview model to generate slide images.
-Supports retry on failure and skips existing files.
+Supports retry on failure, skips existing files, and accepts reference
+images for visual consistency (设定集).
 
 Usage:
     python generate_slide.py "Slide description" -o slides/01_title.png
     python generate_slide.py "Slide description" -o slide.png --retries 5
     python generate_slide.py "Slide description" -o slide.png --style "dark blue bg, white text"
+    python generate_slide.py "Slide description" -o slide.png \
+        --reference-images settings/art_style/ref.png settings/characters/hero/front.png
 
 Environment:
     ANTHROPIC_AUTH_TOKEN   API key for LuckyAPI (required)
@@ -15,6 +18,8 @@ Environment:
     LUCKYAPI_MODEL         Model name (default: (按次)gemini-3-pro-image-preview)
 """
 import argparse
+import base64
+import io
 import os
 import re
 import sys
@@ -26,8 +31,43 @@ except ImportError:
     print("Error: requests not found. Install: pip install requests")
     sys.exit(1)
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # Optional: only needed for --reference-images
 
-def generate_slide(prompt, output, retries=3, api_key=None, base_url=None, model=None):
+
+def _resize_image(img, max_size=512):
+    """Resize image so longest side is max_size."""
+    w, h = img.size
+    if max(w, h) <= max_size:
+        return img
+    if w >= h:
+        new_w = max_size
+        new_h = int(h * max_size / w)
+    else:
+        new_h = max_size
+        new_w = int(w * max_size / h)
+    return img.resize((new_w, new_h), Image.LANCZOS)
+
+
+def _image_to_base64(path, max_size=512):
+    """Read image, resize, return base64 data URI."""
+    if Image is None:
+        raise RuntimeError("Pillow required for --reference-images. "
+                           "Install: pip install Pillow")
+    img = Image.open(path)
+    img = _resize_image(img, max_size)
+    if img.mode == "RGBA":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
+
+
+def generate_slide(prompt, output, retries=3, api_key=None,
+                   base_url=None, model=None, reference_images=None):
     """Generate a slide image and save to output path.
 
     Returns True on success, False on failure.
@@ -49,9 +89,27 @@ def generate_slide(prompt, output, retries=3, api_key=None, base_url=None, model
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+
+    # Build content: reference images + text prompt
+    if reference_images:
+        content_parts = []
+        for ref_path in reference_images:
+            if not os.path.exists(ref_path):
+                print(f"  Warning: reference image not found: {ref_path}")
+                continue
+            data_uri = _image_to_base64(ref_path)
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": data_uri}
+            })
+        content_parts.append({"type": "text", "text": prompt})
+        msg_content = content_parts
+    else:
+        msg_content = prompt
+
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": msg_content}],
         "modalities": ["image", "text"],
     }
 
@@ -109,13 +167,16 @@ def main():
     parser.add_argument("-o", "--output", required=True, help="Output image path")
     parser.add_argument("--retries", type=int, default=3, help="Max retries (default: 3)")
     parser.add_argument("--style", default="", help="Style prefix to prepend to prompt")
+    parser.add_argument("--reference-images", nargs="*", default=None,
+                        help="Reference image paths for visual consistency")
     args = parser.parse_args()
 
     prompt = args.prompt
     if args.style:
         prompt = f"{args.style} {prompt}"
 
-    ok = generate_slide(prompt, args.output, retries=args.retries)
+    ok = generate_slide(prompt, args.output, retries=args.retries,
+                        reference_images=args.reference_images)
     sys.exit(0 if ok else 1)
 
 
