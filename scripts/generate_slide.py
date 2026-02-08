@@ -227,10 +227,136 @@ def _draw_label(draw, text, cell_width, font, cjk_supported=True,
     draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
 
 
+def _quality_check(image_path, prompt, api_key, base_url, model):
+    """Send generated image to the model for quality evaluation.
+
+    Returns (passed: bool, reason: str).
+    """
+    data_uri = _image_to_base64(image_path, max_size=512)
+    check_prompt = (
+        "You are a quality checker for AI-generated manga/slide images. "
+        "Evaluate this image against the intended content below. "
+        "Check for: 1) Strange/deformed characters or body parts, "
+        "2) Incoherent text or garbled characters, "
+        "3) Major layout problems, 4) Content not matching the description. "
+        "Respond with EXACTLY one line: 'PASS' if acceptable, or "
+        "'FAIL: <brief reason>' if there are serious flaws. "
+        "Minor imperfections are OK — only flag serious issues.\n\n"
+        f"Intended content: {prompt}"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_uri}},
+                {"type": "text", "text": check_prompt},
+            ]
+        }],
+    }
+
+    url = f"{base_url}/chat/completions"
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=120)
+        if r.status_code != 200:
+            print(f"  QC: HTTP {r.status_code}, skipping check")
+            return True, "check unavailable"
+
+        resp = r.json()
+        text = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+        text = text.strip()
+        print(f"  QC: {text[:100]}")
+
+        if text.upper().startswith("PASS"):
+            return True, text
+        elif text.upper().startswith("FAIL"):
+            reason = text[5:].strip(": ")
+            return False, reason
+        else:
+            return True, text
+    except Exception as e:
+        print(f"  QC error: {e}, skipping")
+        return True, str(e)
+
+
+def _refine_image(image_path, prompt, reason, output,
+                  reference_data_uri, api_key, base_url, model):
+    """Regenerate an image using the flawed version as context."""
+    flawed_uri = _image_to_base64(image_path, max_size=512)
+    refine_prompt = (
+        f"The previous attempt had issues: {reason}. "
+        f"Please regenerate and fix these problems. "
+        f"Original request: {prompt}"
+    )
+
+    content_parts = []
+    if reference_data_uri:
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": reference_data_uri}
+        })
+    content_parts.append({
+        "type": "image_url",
+        "image_url": {"url": flawed_uri}
+    })
+    content_parts.append({"type": "text", "text": refine_prompt})
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "modalities": ["image", "text"],
+    }
+
+    url = f"{base_url}/chat/completions"
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=300)
+        if r.status_code != 200:
+            print(f"  Refine: HTTP {r.status_code}")
+            return False
+
+        resp = r.json()
+        text = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        url_match = re.search(r'!\[.*?\]\((https?://[^\s\)]+)\)', text)
+        if not url_match:
+            url_match = re.search(
+                r'(https?://\S+\.(?:png|jpg|jpeg|webp|gif))',
+                text, re.IGNORECASE,
+            )
+        if not url_match:
+            print(f"  Refine: no image in response")
+            return False
+
+        img_url = url_match.group(1)
+        img_resp = requests.get(img_url, timeout=60)
+        if img_resp.status_code == 200 and len(img_resp.content) > 1000:
+            with open(output, "wb") as f:
+                f.write(img_resp.content)
+            print(f"  Refine: OK ({len(img_resp.content):,} bytes)")
+            return True
+        return False
+    except Exception as e:
+        print(f"  Refine error: {e}")
+        return False
+
+
 def generate_slide(prompt, output, retries=3, api_key=None,
                    base_url=None, model=None, reference_images=None,
-                   reference_labels=None):
+                   reference_labels=None, quality_check=False,
+                   max_refine=2):
     """Generate a slide image and save to output path.
+
+    If quality_check=True, evaluates the generated image and refines
+    up to max_refine times if serious flaws are detected.
 
     Returns True on success, False on failure.
     """
@@ -306,6 +432,33 @@ def generate_slide(prompt, output, retries=3, api_key=None,
                 with open(output, "wb") as f:
                     f.write(img_resp.content)
                 print(f"  OK ({len(img_resp.content):,} bytes) -> {output}")
+
+                # Quality check + refine loop
+                if quality_check:
+                    ref_data_uri = None
+                    if reference_images:
+                        ref_data_uri = _concatenate_reference_images(
+                            reference_images, labels=reference_labels
+                        )
+                    for qc_round in range(max_refine):
+                        passed, reason = _quality_check(
+                            output, prompt, api_key, base_url, model
+                        )
+                        if passed:
+                            print(f"  QC passed")
+                            break
+                        print(f"  QC failed ({qc_round+1}/{max_refine}): "
+                              f"{reason}")
+                        refined = _refine_image(
+                            output, prompt, reason, output,
+                            ref_data_uri, api_key, base_url, model,
+                        )
+                        if not refined:
+                            print(f"  Refine failed, keeping current")
+                            break
+                    else:
+                        print(f"  Max refine attempts reached, keeping best")
+
                 return True
             else:
                 print(f"  Download failed: HTTP {img_resp.status_code}")

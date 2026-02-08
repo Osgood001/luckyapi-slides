@@ -98,7 +98,7 @@ def resolve_settings_descriptions(settings_keys, settings):
 
 
 def generate_one_slide(slide_info, style_prefix, settings,
-                       slides_dir, base_dir):
+                       slides_dir, base_dir, quality_check=False):
     """Generate a single slide with settings context."""
     filename = slide_info["filename"]
     prompt = slide_info["prompt"]
@@ -127,12 +127,13 @@ def generate_one_slide(slide_info, style_prefix, settings,
         full_prompt, output, retries=3,
         reference_images=ref_images if ref_images else None,
         reference_labels=ref_labels if ref_labels else None,
+        quality_check=quality_check,
     )
     return filename, ok
 
 
 def run_deck(plan_path, output_pdf=None, slides_dir=None,
-             workers=3, base_dir=None):
+             workers=3, base_dir=None, quality_check=False):
     """Run the full deck generation pipeline."""
     with open(plan_path) as f:
         plan = json.load(f)
@@ -176,7 +177,7 @@ def run_deck(plan_path, output_pdf=None, slides_dir=None,
         for slide_info in slides:
             future = executor.submit(
                 generate_one_slide, slide_info, style_prefix,
-                settings, slides_dir, base_dir,
+                settings, slides_dir, base_dir, quality_check,
             )
             futures[future] = slide_info["filename"]
 
@@ -234,12 +235,15 @@ def main():
                         help="Parallel workers (default: 3)")
     parser.add_argument("--base-dir", default=None,
                         help="Base directory (default: plan file's directory)")
+    parser.add_argument("--quality-check", "-q", action="store_true",
+                        help="Enable quality check and auto-refinement")
     args = parser.parse_args()
 
     ok = run_deck(
         args.plan, output_pdf=args.output,
         slides_dir=args.slides_dir,
         workers=args.workers, base_dir=args.base_dir,
+        quality_check=args.quality_check,
     )
     sys.exit(0 if ok else 1)
 
