@@ -70,6 +70,46 @@ def image_to_base64(path, max_size=512):
     return f"data:image/png;base64,{b64}"
 
 
+def concatenate_reference_images(paths, cell_size=256, max_cols=3):
+    """Concatenate multiple images into a single reference sheet."""
+    imgs = []
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        img = Image.open(p)
+        if img.mode == "RGBA":
+            img = img.convert("RGB")
+        img = resize_image(img, cell_size)
+        imgs.append(img)
+
+    if not imgs:
+        return None
+    if len(imgs) == 1:
+        buf = io.BytesIO()
+        imgs[0].save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return f"data:image/png;base64,{b64}"
+
+    n = len(imgs)
+    cols = min(n, max_cols)
+    rows = (n + cols - 1) // cols
+    canvas_w = cols * cell_size
+    canvas_h = rows * cell_size
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+
+    for i, img in enumerate(imgs):
+        row = i // cols
+        col = i % cols
+        x = col * cell_size + (cell_size - img.size[0]) // 2
+        y = row * cell_size + (cell_size - img.size[1]) // 2
+        canvas.paste(img, (x, y))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
+
+
 def generate_reference(prompt, output, reference_images=None,
                        max_size=512, retries=3):
     """Generate a reference image and save to output path."""
@@ -88,25 +128,20 @@ def generate_reference(prompt, output, reference_images=None,
         "Content-Type": "application/json",
     }
 
-    # Build content: text + optional reference images
-    content_parts = []
+    # Build content: concatenated reference sheet + text prompt
     if reference_images:
-        for ref_path in reference_images:
-            if not os.path.exists(ref_path):
-                print(f"  Warning: reference image not found: {ref_path}")
-                continue
-            data_uri = image_to_base64(ref_path, max_size)
-            content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": data_uri}
-            })
-    content_parts.append({"type": "text", "text": prompt})
-
-    # Use multi-part if we have images, plain string otherwise
-    if len(content_parts) == 1:
-        msg_content = prompt
+        ref_data_uri = concatenate_reference_images(
+            reference_images, cell_size=max_size
+        )
+        if ref_data_uri:
+            msg_content = [
+                {"type": "image_url", "image_url": {"url": ref_data_uri}},
+                {"type": "text", "text": prompt},
+            ]
+        else:
+            msg_content = prompt
     else:
-        msg_content = content_parts
+        msg_content = prompt
 
     payload = {
         "model": model,

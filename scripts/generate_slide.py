@@ -66,8 +66,170 @@ def _image_to_base64(path, max_size=512):
     return f"data:image/png;base64,{b64}"
 
 
+def _concatenate_reference_images(paths, cell_size=256, max_cols=3,
+                                   labels=None):
+    """Concatenate multiple images into a single labeled reference sheet.
+
+    Arranges images in a grid so the model sees all references at once
+    instead of processing them as separate inputs (which can overwhelm it).
+    Each cell can have a label drawn at the top for identification.
+
+    Args:
+        paths: List of image file paths.
+        cell_size: Size of each grid cell in pixels.
+        max_cols: Maximum columns in the grid.
+        labels: Optional list of label strings, one per path.
+    """
+    if Image is None:
+        raise RuntimeError("Pillow required for --reference-images. "
+                           "Install: pip install Pillow")
+    from PIL import ImageDraw, ImageFont
+
+    imgs = []
+    valid_labels = []
+    for i, p in enumerate(paths):
+        if not os.path.exists(p):
+            continue
+        img = Image.open(p)
+        if img.mode == "RGBA":
+            img = img.convert("RGB")
+        imgs.append(img)
+        if labels and i < len(labels):
+            valid_labels.append(labels[i])
+        else:
+            valid_labels.append(None)
+
+    if not imgs:
+        return None
+
+    if len(imgs) == 1:
+        # Single image — add label if present, then return
+        img = _resize_image(imgs[0], cell_size)
+        if valid_labels[0]:
+            draw = ImageDraw.Draw(img)
+            font, cjk_ok = _get_label_font(16)
+            _draw_label(draw, valid_labels[0], img.size[0], font,
+                        cjk_supported=cjk_ok)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return f"data:image/png;base64,{b64}"
+
+    # Reserve space for label text at top of each cell
+    label_h = 24
+    img_area = cell_size - label_h
+
+    # Calculate grid layout
+    n = len(imgs)
+    cols = min(n, max_cols)
+    rows = (n + cols - 1) // cols
+
+    # Create canvas with white background
+    canvas_w = cols * cell_size
+    canvas_h = rows * cell_size
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+    font, cjk_ok = _get_label_font(14)
+
+    # Paste each image centered in its cell, with label
+    for i, img in enumerate(imgs):
+        row = i // cols
+        col = i % cols
+        cell_x = col * cell_size
+        cell_y = row * cell_size
+
+        # Draw label at top of cell
+        if valid_labels[i]:
+            _draw_label(draw, valid_labels[i], cell_size,
+                        font, cjk_supported=cjk_ok,
+                        offset_x=cell_x, offset_y=cell_y)
+
+        # Resize image to fit below label
+        img = _resize_image(img, img_area)
+        x = cell_x + (cell_size - img.size[0]) // 2
+        y = cell_y + label_h + (img_area - img.size[1]) // 2
+        canvas.paste(img, (x, y))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
+
+
+def _get_label_font(size=14):
+    """Try to load a font that supports CJK characters."""
+    from PIL import ImageFont
+    # Common CJK font paths on Linux/Mac/Windows
+    cjk_fonts = [
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+    ]
+    # Also check user-local fonts
+    import os.path
+    home = os.path.expanduser("~")
+    cjk_fonts.append(os.path.join(home, ".local/share/fonts/NotoSansSC.ttf"))
+
+    for path in cjk_fonts:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size), True
+            except Exception:
+                continue
+    # Fallback: use DejaVu or default (no CJK support)
+    fallback_fonts = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+    ]
+    for path in fallback_fonts:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size), False
+            except Exception:
+                continue
+    return ImageFont.load_default(), False
+
+
+def _sanitize_label(text, cjk_supported):
+    """If CJK font not available, strip non-ASCII characters."""
+    if cjk_supported:
+        return text
+    # Keep ASCII and common punctuation, replace CJK with nothing
+    clean = ""
+    for ch in text:
+        if ord(ch) < 128:
+            clean += ch
+    return clean.strip() or text  # fallback to original if all stripped
+
+
+def _draw_label(draw, text, cell_width, font, cjk_supported=True,
+                offset_x=0, offset_y=0):
+    """Draw a centered label with dark background strip."""
+    text = _sanitize_label(text, cjk_supported)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    # Dark semi-transparent strip
+    strip_h = th + 6
+    draw.rectangle(
+        [offset_x, offset_y, offset_x + cell_width, offset_y + strip_h],
+        fill=(40, 40, 40),
+    )
+    # Centered white text
+    tx = offset_x + (cell_width - tw) // 2
+    ty = offset_y + 3
+    draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
+
+
 def generate_slide(prompt, output, retries=3, api_key=None,
-                   base_url=None, model=None, reference_images=None):
+                   base_url=None, model=None, reference_images=None,
+                   reference_labels=None):
     """Generate a slide image and save to output path.
 
     Returns True on success, False on failure.
@@ -90,20 +252,18 @@ def generate_slide(prompt, output, retries=3, api_key=None,
         "Content-Type": "application/json",
     }
 
-    # Build content: reference images + text prompt
+    # Build content: concatenated reference sheet + text prompt
     if reference_images:
-        content_parts = []
-        for ref_path in reference_images:
-            if not os.path.exists(ref_path):
-                print(f"  Warning: reference image not found: {ref_path}")
-                continue
-            data_uri = _image_to_base64(ref_path)
-            content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": data_uri}
-            })
-        content_parts.append({"type": "text", "text": prompt})
-        msg_content = content_parts
+        ref_data_uri = _concatenate_reference_images(
+            reference_images, labels=reference_labels
+        )
+        if ref_data_uri:
+            msg_content = [
+                {"type": "image_url", "image_url": {"url": ref_data_uri}},
+                {"type": "text", "text": prompt},
+            ]
+        else:
+            msg_content = prompt
     else:
         msg_content = prompt
 

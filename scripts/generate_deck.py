@@ -37,34 +37,44 @@ from slides_to_pdf import combine_images_to_pdf
 
 
 def resolve_settings_images(settings_keys, settings, base_dir="."):
-    """Resolve setting keys like 'art_style', 'characters.hero' to image paths."""
+    """Resolve setting keys like 'art_style', 'characters.hero' to image paths and labels."""
     images = []
+    labels = []
     for key in settings_keys:
         parts = key.split(".", 1)
         category = parts[0]
 
         if category == "art_style":
+            desc = settings.get("art_style", {}).get("description", "")
+            label = f"Art Style: {desc[:30]}" if desc else "Art Style"
             for p in settings.get("art_style", {}).get("images", []):
                 full = os.path.join(base_dir, p)
                 if os.path.exists(full):
                     images.append(full)
+                    labels.append(label)
         elif len(parts) == 2:
             name = parts[1]
             entry = settings.get(category, {}).get(name, {})
+            desc = entry.get("description", "")
+            label = f"{name}: {desc[:30]}" if desc else name
             for p in entry.get("images", []):
                 full = os.path.join(base_dir, p)
                 if os.path.exists(full):
                     images.append(full)
+                    labels.append(label)
         else:
             # Category-level: include all images from all entries
             cat_data = settings.get(category, {})
             for name, entry in cat_data.items():
                 if isinstance(entry, dict):
+                    desc = entry.get("description", "")
+                    label = f"{name}: {desc[:30]}" if desc else name
                     for p in entry.get("images", []):
                         full = os.path.join(base_dir, p)
                         if os.path.exists(full):
                             images.append(full)
-    return images
+                            labels.append(label)
+    return images, labels
 
 
 def resolve_settings_descriptions(settings_keys, settings):
@@ -104,18 +114,19 @@ def generate_one_slide(slide_info, style_prefix, settings,
         full_prompt += desc_text + " "
     full_prompt += prompt
 
-    # Resolve reference images
-    ref_images = resolve_settings_images(
+    # Resolve reference images and labels
+    ref_images, ref_labels = resolve_settings_images(
         settings_keys, settings, base_dir
     )
 
     print(f"\n[{filename}] Generating...")
     if ref_images:
-        print(f"  Reference images: {len(ref_images)}")
+        print(f"  Reference images: {len(ref_images)} (concatenated)")
 
     ok = generate_slide(
         full_prompt, output, retries=3,
         reference_images=ref_images if ref_images else None,
+        reference_labels=ref_labels if ref_labels else None,
     )
     return filename, ok
 
